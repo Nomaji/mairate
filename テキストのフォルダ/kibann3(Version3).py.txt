@@ -1,0 +1,423 @@
+'''
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import csv
+from PIL import Image, ImageTk, ImageDraw, ImageFont,ImageEnhance
+import os
+
+# --- 定数 ---
+APP_TITLE = "mairate_bynomaji(@nomaji1030)"
+WINDOW_WIDTH = 1000
+WINDOW_HEIGHT = 800 # 少し高さを増やす
+TABLE_ROWS = 10
+TABLE_COLS = 5
+MAX_SONGS_DISPLAY = TABLE_ROWS * TABLE_COLS
+CELL_WIDTH = 190 # セルの幅を少し広げる
+CELL_HEIGHT = 85  # セルの高さを増やして情報を表示しやすくする
+FONT_NAME = "Yu Gothic UI" # Windowsの場合。Macなら "Hiragino Sans" など
+FONT_SIZE_RATE = 20 # レート値のフォントサイズ
+FONT_SIZE_TITLE = 10
+FONT_SIZE_DETAIL = 8
+BACKGROUND_IMAGE_PATH = "background.png"
+SONG_MASTER_CSV_PATH = "C:/Users/USER/Desktop/mairate/song_master.csv"
+IMAGES_DIR = "ジャケット/"
+
+# --- ダミーのレート計算関数 
+"""
+def (level: float, achievement_rate: float) -> float:
+    if achievement_rate >= 1007500:
+        rate = level * (achievement_rate / 1000000) * 2.0
+    elif achievement_rate >= 1000000:
+        rate = level * (achievement_rate / 1000000) * 1.8
+    elif achievement_rate >= 970000:
+        rate = level * (achievement_rate / 1000000) * 1.5
+    else:
+        rate = level * (achievement_rate / 1000000) * 1.0
+    return round(rate * 100)
+"""
+
+from calculate import calculate_rate
+
+class RatingApp:
+    def __init__(self, master):
+        self.master = master
+        master.title(APP_TITLE)
+        master.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+
+        self.song_data_list = []
+        self.song_master_data = self.load_song_master_data()
+        self.image_cache = {}
+
+        try:
+            self.bg_image = Image.open(BACKGROUND_IMAGE_PATH)
+            self.bg_photo_image = ImageTk.PhotoImage(self.bg_image.resize((WINDOW_WIDTH, WINDOW_HEIGHT)))
+            self.bg_label = tk.Label(master, image=self.bg_photo_image)
+            self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+        except FileNotFoundError:
+            print(f"背景画像 {BACKGROUND_IMAGE_PATH} が見つかりません。")
+        except Exception as e:
+            print(f"背景画像の読み込みエラー: {e}")
+
+        input_frame = ttk.Frame(master, padding="10")
+        input_frame.pack(pady=10, padx=10, fill="x")
+
+        ttk.Label(input_frame, text="曲名:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.song_name_entry = ttk.Entry(input_frame, width=30)
+        self.song_name_entry.grid(row=0, column=1, padx=5, pady=2)
+
+        ttk.Label(input_frame, text="難易度:").grid(row=0, column=2, padx=5, pady=2, sticky="w")
+        self.difficulty_entry = ttk.Entry(input_frame, width=10) # MASTER, EXPERTなど
+        self.difficulty_entry.grid(row=0, column=3, padx=5, pady=2)
+
+        ttk.Label(input_frame, text="STD/DX:").grid(row=0, column=4, padx=5, pady=2, sticky="w") # STDORDX入力追加
+        self.std_or_dx_entry = ttk.Entry(input_frame, width=5) # STD, DX
+        self.std_or_dx_entry.grid(row=0, column=5, padx=5, pady=2)
+
+        ttk.Label(input_frame, text="スコア:").grid(row=1, column=0, padx=5, pady=2, sticky="w")
+        self.score_entry = ttk.Entry(input_frame, width=10)
+        self.score_entry.grid(row=1, column=1, padx=5, pady=2)
+
+        self.add_button = ttk.Button(input_frame, text="追加", command=self.add_song_data)
+        self.add_button.grid(row=1, column=2, padx=5, pady=2)
+
+        self.import_csv_button = ttk.Button(input_frame, text="スコアCSVインポート", command=self.import_scores_from_csv)
+        self.import_csv_button.grid(row=2, column=0, columnspan=2, padx=5, pady=5)
+
+        self.calculate_button = ttk.Button(input_frame, text="レート計算＆表示", command=self.calculate_and_display_ratings)
+        self.calculate_button.grid(row=2, column=2, columnspan=2, padx=5, pady=5)
+
+        self.export_button = ttk.Button(input_frame, text="画像エクスポート", command=self.export_table_as_image, state=tk.DISABLED)
+        self.export_button.grid(row=2, column=4, columnspan=2, padx=5, pady=5)
+
+        self.canvas_frame = ttk.Frame(master)
+        self.canvas_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
+        self.canvas = tk.Canvas(self.canvas_frame, bg="white", scrollregion=(0,0, CELL_WIDTH * TABLE_COLS, CELL_HEIGHT * TABLE_ROWS))
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        v_scrollbar = ttk.Scrollbar(self.canvas_frame, orient="vertical", command=self.canvas.yview)
+        v_scrollbar.pack(side="right", fill="y")
+        self.canvas.configure(yscrollcommand=v_scrollbar.set)
+
+        h_scrollbar = ttk.Scrollbar(master, orient="horizontal", command=self.canvas.xview)
+        h_scrollbar.pack(fill="x", padx=10, pady=(0,10))
+        self.canvas.configure(xscrollcommand=h_scrollbar.set)
+
+        if not self.song_master_data:
+            messagebox.showwarning("マスタデータエラー", f"{SONG_MASTER_CSV_PATH} が読み込めませんでした。")
+
+    def load_song_master_data(self):
+        master_data = {}
+        try:
+            with open(SONG_MASTER_CSV_PATH, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                # CSVヘッダーに 'STDORDX' が含まれているか確認
+                if 'STDORDX' not in reader.fieldnames:
+                    messagebox.showerror("マスタCSVエラー", f"{SONG_MASTER_CSV_PATH} に 'STDORDX' 列がありません。")
+                    return {}
+                for row in reader:
+                    # キーを (曲名, 難易度, STDORDX) のタプルに変更
+                    key = (row['曲名'], row['難易度'], row['STDORDX'])
+                    master_data[key] = {
+                        '譜面定数': float(row['譜面定数']),
+                        'レベル': row['レベル'],
+                        'STDORDX_val': row['STDORDX'], # STDORDXの値も保持しておく
+                        '画像ファイル名': row.get('画像ファイル名', '')
+                    }
+            print(f"{SONG_MASTER_CSV_PATH} を読み込みました。")
+        except FileNotFoundError:
+            print(f"エラー: {SONG_MASTER_CSV_PATH} が見つかりません。")
+        except Exception as e:
+            print(f"楽曲マスタCSVの読み込みエラー: {e}")
+        return master_data
+
+    def add_song_data(self):
+        song_name = self.song_name_entry.get()
+        difficulty = self.difficulty_entry.get()
+        std_or_dx = self.std_or_dx_entry.get().upper() # 大文字に統一 (STD, DX)
+        score_str = self.score_entry.get()
+
+        if not all([song_name, difficulty, std_or_dx, score_str]):
+            messagebox.showerror("入力エラー", "曲名、難易度、STD/DX、スコアをすべて入力してください。")
+            return
+        if std_or_dx not in ["STD", "DX"]: # 簡単なバリデーション
+            messagebox.showerror("入力エラー", "STD/DXは 'STD' または 'DX' で入力してください。")
+            return
+        try:
+            score = int(score_str)
+        except ValueError:
+            messagebox.showerror("入力エラー", "スコアは数値で入力してください。")
+            return
+
+        self._add_song_to_list(song_name, difficulty, std_or_dx, score)
+        self.song_name_entry.delete(0, tk.END)
+        self.difficulty_entry.delete(0, tk.END)
+        self.std_or_dx_entry.delete(0, tk.END)
+        self.score_entry.delete(0, tk.END)
+        print(f"追加: {song_name} ({difficulty} / {std_or_dx}) - スコア: {score}")
+        # self.update_song_count_display()
+
+    def _add_song_to_list(self, song_name, difficulty, std_or_dx, score):
+        master_key = (song_name, difficulty, std_or_dx) # キーにSTDORDXを追加
+        if master_key not in self.song_master_data:
+            messagebox.showwarning("マスタ参照エラー", f"楽曲「{song_name} ({difficulty} / {std_or_dx})」がマスタに見つかりません。")
+            chart_info = {'譜面定数': 0.0, 'レベル': 'N/A', 'STDORDX_val': std_or_dx, '画像ファイル名': ''}
+        else:
+            chart_info = self.song_master_data[master_key]
+
+        song_entry = {
+            '曲名': song_name,
+            '難易度': difficulty,
+            'STDORDX': std_or_dx, # song辞書にもSTDORDXを格納
+            'スコア': score,
+            '譜面定数': chart_info['譜面定数'],
+            'レベル': chart_info['レベル'],
+            '画像パス': os.path.join(IMAGES_DIR, chart_info['画像ファイル名']) if chart_info.get('画像ファイル名') else '',
+            'レート値': 0.0
+        }
+        self.song_data_list.append(song_entry)
+
+    def import_scores_from_csv(self):
+        filepath = filedialog.askopenfilename(
+            title="スコアCSVファイルを選択",
+            filetypes=[("CSVファイル", "*.csv")]
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                # CSVのヘッダーに 'STDORDX' も含める
+                required_headers = ['曲名', '難易度', 'STDORDX', 'スコア']
+                if not all(header in reader.fieldnames for header in required_headers):
+                    messagebox.showerror("CSVフォーマットエラー", f"CSVファイルには '{', '.join(required_headers)}' のヘッダーが必要です。")
+                    return
+
+                imported_count = 0
+                for row in reader:
+                    try:
+                        song_name = row['曲名']
+                        difficulty = row['難易度']
+                        std_or_dx = row['STDORDX'].upper() # 大文字に統一
+                        score = int(row['スコア'])
+                        if std_or_dx not in ["STD", "DX"]:
+                            print(f"警告: STDORDXの値が不正な行がありました (STD/DX以外): {row}")
+                            continue
+                        self._add_song_to_list(song_name, difficulty, std_or_dx, score)
+                        imported_count += 1
+                    except ValueError:
+                        print(f"警告: スコアの形式が不正な行がありました: {row}")
+                    except KeyError as e:
+                        print(f"警告: CSVの必須列が見つかりません ({e}): {row}")
+            messagebox.showinfo("インポート完了", f"{imported_count} 件の楽曲データをインポートしました。")
+            # self.update_song_count_display()
+        except FileNotFoundError:
+            messagebox.showerror("エラー", "ファイルが見つかりません。")
+        except Exception as e:
+            messagebox.showerror("インポートエラー", f"CSVファイルの処理中にエラーが発生しました: {e}")
+            print(f"CSVインポートエラー詳細: {e}")
+
+    def calculate_and_display_ratings(self):
+        if not self.song_data_list:
+            messagebox.showinfo("情報", "表示する楽曲データがありません。")
+            return
+
+        for song in self.song_data_list:
+            try:
+                level = float(song['譜面定数'])
+                achievement_rate = float(song['スコア'])
+                song['レート値'] = calculate_rate(level, achievement_rate)
+            except ValueError:
+                song['レート値'] = 0.0
+                print(f"レート計算エラー: {song['曲名']} - 譜面定数またはスコアの形式が不正です。")
+            except Exception as e:
+                song['レート値'] = 0.0
+                print(f"レート計算中に予期せぬエラー: {song['曲名']} - {e}")
+
+        sorted_songs = sorted(self.song_data_list, key=lambda s: s['レート値'], reverse=True)
+        self.top_songs = sorted_songs[:MAX_SONGS_DISPLAY]
+
+        self.display_rating_table()
+        self.export_button.config(state=tk.NORMAL)
+
+    def display_rating_table(self):
+        self.canvas.delete("all")
+
+        if not hasattr(self, 'top_songs') or not self.top_songs:
+            return
+
+        for i, song in enumerate(self.top_songs):
+            row = i // TABLE_COLS
+            col = i % TABLE_COLS
+            x1 = col * CELL_WIDTH
+            y1 = row * CELL_HEIGHT
+            x2 = x1 + CELL_WIDTH
+            y2 = y1 + CELL_HEIGHT
+
+            img_path = song.get('画像パス', '')
+            if img_path and os.path.exists(img_path):
+                if img_path not in self.image_cache:
+                    try:
+                        img = Image.open(img_path)
+                        img = img.resize((CELL_WIDTH, CELL_HEIGHT), Image.LANCZOS)
+
+                         # 明るさを調整する処理を追加
+                        brightness_factor = 0.5 # 0.0 (黒) から 1.0 (元の明るさ) の範囲で調整
+                        enhancer = ImageEnhance.Brightness(img)
+                        img_brightness_adjusted = enhancer.enhance(brightness_factor)
+
+
+
+                        
+                        #self.image_cache[img_path] = ImageTk.PhotoImage(img)　修正前
+                        self.image_cache[img_path] = ImageTk.PhotoImage(img_brightness_adjusted) # ← 修正: 調整後の画像を渡す
+                        
+
+
+                    except Exception as e:
+                        print(f"画像読み込みエラー ({img_path}): {e}")
+                        self.image_cache[img_path] = None
+                if self.image_cache[img_path]:
+                    self.canvas.create_image(x1, y1, anchor="nw", image=self.image_cache[img_path])
+                else:
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill="lightgrey", outline="black")
+            else:
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill="lightgrey", outline="black")
+                if img_path:
+                    print(f"画像ファイルが見つかりません: {img_path}")
+            
+            # テキスト描画のための設定
+            padding = 3
+            text_x = x1 + padding
+            
+            # 1. レート値 (大きく目立つフォント)
+            rate_y = y1 + padding
+            self.canvas.create_text(text_x, rate_y, anchor="nw",
+                                    text=f"{song['レート値']:.0f}", # 整数で表示
+                                    font=(FONT_NAME, FONT_SIZE_RATE, "bold"), fill="red") # 色を目立たせる
+
+            # 2. 曲名 (レート値の下)
+            title_y = rate_y + FONT_SIZE_RATE + padding
+            song_name_display = song['曲名']
+            # 曲名が長すぎる場合は調整 (CELL_WIDTHに応じて調整)
+            # Canvasのフォントメトリクスを使って正確に幅を計算するのが理想だが、簡略化
+            max_title_len = int(CELL_WIDTH / (FONT_SIZE_TITLE * 0.7)) # おおよその最大文字数
+            if len(song_name_display) > max_title_len:
+                 song_name_display = song_name_display[:max_title_len-1] + "…"
+            self.canvas.create_text(text_x, title_y, anchor="nw",
+                                    text=song_name_display,
+                                    font=(FONT_NAME, FONT_SIZE_TITLE), fill="white")
+
+            # 3. 難易度とレベル (曲名の下)
+            difficulty_y = title_y + FONT_SIZE_TITLE + padding
+            self.canvas.create_text(text_x, difficulty_y, anchor="nw",
+                                    text=f"{song['難易度']} [{song['レベル']}]",
+                                    font=(FONT_NAME, FONT_SIZE_DETAIL), fill="white")
+
+            # 4. 譜面定数とSTDORDX (難易度の下)
+            const_y = difficulty_y + FONT_SIZE_DETAIL + padding
+            self.canvas.create_text(text_x, const_y, anchor="nw",
+                                    text=f"定数:{song['譜面定数']:.1f} ({song['STDORDX']})",
+                                    font=(FONT_NAME, FONT_SIZE_DETAIL), fill="white")
+            
+            #スコア表示、少数第四桁までの％表示に変換
+
+            achivescore_y = const_y + FONT_SIZE_DETAIL + padding
+            self.canvas.create_text(text_x, achivescore_y, anchor="nw",
+                                    text=f"スコア:{song['スコア']/10000:.4f} % ",
+                                    font=(FONT_NAME, FONT_SIZE_DETAIL), fill="white")
+
+        self.canvas.config(scrollregion=self.canvas.bbox("all"))
+
+
+    def export_table_as_image(self):
+        if not hasattr(self, 'top_songs') or not self.top_songs:
+            messagebox.showinfo("情報", "エクスポートするデータがありません。")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNGファイル", "*.png"), ("JPEGファイル", "*.jpg")],
+            title="画像を保存"
+        )
+        if not filepath:
+            return
+
+        try:
+            num_songs = len(self.top_songs)
+            num_rows_needed = (num_songs + TABLE_COLS - 1) // TABLE_COLS
+            img_width = CELL_WIDTH * TABLE_COLS
+            img_height = CELL_HEIGHT * num_rows_needed
+
+            image = Image.new("RGB", (img_width, img_height), "white")
+            draw = ImageDraw.Draw(image)
+            
+            try: # Pillow用フォントロード
+                font_rate = ImageFont.truetype(f"{FONT_NAME} Bold.ttf", FONT_SIZE_RATE)
+                font_title = ImageFont.truetype(f"{FONT_NAME}.ttf", FONT_SIZE_TITLE)
+                font_detail = ImageFont.truetype(f"{FONT_NAME}.ttf", FONT_SIZE_DETAIL)
+            except IOError:
+                print(f"警告: 指定フォントファイル ({FONT_NAME}) が見つかりません。デフォルトフォントを使用します。")
+                font_rate = ImageFont.truetype("arialbd.ttf", FONT_SIZE_RATE) # Arial Boldなど代替
+                font_title = ImageFont.truetype("arial.ttf", FONT_SIZE_TITLE) # Arial
+                font_detail = ImageFont.truetype("arial.ttf", FONT_SIZE_DETAIL) # Arial
+
+
+            for i, song in enumerate(self.top_songs):
+                row = i // TABLE_COLS
+                col = i % TABLE_COLS
+                x1 = col * CELL_WIDTH
+                y1 = row * CELL_HEIGHT
+
+                img_path = song.get('画像パス', '')
+                pil_img_to_draw = None
+                if img_path and os.path.exists(img_path):
+                    try:
+                        original_pil_img = Image.open(img_path)
+                        pil_img_to_draw = original_pil_img.resize((CELL_WIDTH, CELL_HEIGHT), Image.LANCZOS)
+                    except Exception as e:
+                        print(f"エクスポート用画像読み込みエラー ({img_path}): {e}")
+                if pil_img_to_draw:
+                    image.paste(pil_img_to_draw, (x1, y1))
+                else:
+                    draw.rectangle([x1, y1, x1 + CELL_WIDTH, y1 + CELL_HEIGHT], fill="lightgrey", outline="black")
+
+                padding = 3
+                text_x = x1 + padding
+                
+                rate_y = y1 + padding
+                draw.text((text_x, rate_y), f"{song['レート値']:.0f}", font=font_rate, fill="red")
+
+                title_y = rate_y + FONT_SIZE_RATE + padding
+                song_name_display = song['曲名']
+                # Pillowのtextbboxで正確な長さを取得して調整するのが望ましい
+                # ここではCanvasと同じ簡易的な文字数制限
+                max_title_len = int(CELL_WIDTH / (FONT_SIZE_TITLE * 0.7))
+                if len(song_name_display) > max_title_len:
+                     song_name_display = song_name_display[:max_title_len-1] + "…"
+                draw.text((text_x, title_y), song_name_display, font=font_title, fill="white")
+                
+                difficulty_y = title_y + FONT_SIZE_TITLE + padding
+                draw.text((text_x, difficulty_y), f"{song['難易度']} [{song['レベル']}]", font=font_detail, fill="white")
+                
+                const_y = difficulty_y + FONT_SIZE_DETAIL + padding
+                draw.text((text_x, const_y), f"定数:{song['譜面定数']:.1f} ({song['STDORDX']})", font=font_detail, fill="white")
+
+                
+
+            image.save(filepath)
+            messagebox.showinfo("エクスポート完了", f"画像を {filepath} に保存しました。")
+        except Exception as e:
+            messagebox.showerror("エクスポートエラー", f"画像の保存中にエラーが発生しました: {e}")
+            print(f"エクスポートエラー詳細: {e}")
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    app = RatingApp(root)
+    root.mainloop()
+
+    
+
+'''
